@@ -368,7 +368,7 @@ locator_t::refresh(const std::string& name) {
     std::vector<std::string> groups;
 
     // It's here to keep the reference alive.
-    auto storage = api::storage(m_context, "core");
+    const auto storage = api::storage(m_context, "core");
 
     try {
         groups = storage->find("groups", std::vector<std::string>({
