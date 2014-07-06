@@ -468,10 +468,21 @@ engine_t::pump() {
 
 void
 engine_t::balance() {
+    typedef pool_map_t::value_type pool_map_entry_t;
+
+    collector_t collector;
     std::lock_guard<std::mutex> pool_guard(m_pool_mutex);
 
+    size_t alive = std::count_if(
+        m_pool.cbegin(),
+        m_pool.cend(),
+        [](const pool_map_entry_t& slave) {return slave.second->active();}
+    );
+
+    auto sleeping = m_pool.size() - alive;
+
     if(m_pool.size() >= m_profile.pool_limit ||
-       m_pool.size() * m_profile.grow_threshold >= m_queue.size())
+       alive * m_profile.grow_threshold >= m_queue.size())
     {
         return;
     }
@@ -484,7 +495,7 @@ engine_t::balance() {
         )
     );
 
-    if(target <= m_pool.size()) {
+    if(target <= alive) {
         return;
     }
 
@@ -492,10 +503,10 @@ engine_t::balance() {
         m_log,
         "enlarging the pool from %d to %d slaves",
         m_pool.size(),
-        target
+        target + sleeping
     );
 
-    while(m_pool.size() != target) {
+    while(m_pool.size() != target + sleeping) {
         const auto id = unique_id_t().string();
 
         try {
