@@ -109,6 +109,7 @@ slave_t::slave_t(context_t& context, reactor_t& reactor, const manifest_t& manif
 #endif
     m_heartbeat_timer(new ev::timer(reactor.native())),
     m_idle_timer(new ev::timer(reactor.native())),
+    m_termination_timer(new ev::timer(reactor.native())),
     m_output_ring(profile.crashlog_limit)
 {
     reactor.update();
@@ -126,6 +127,8 @@ slave_t::slave_t(context_t& context, reactor_t& reactor, const manifest_t& manif
 
     // NOTE: Idle timer will be started on the first heartbeat.
     m_idle_timer->set<slave_t, &slave_t::on_idle>(this);
+
+    m_termination_timer->set<slave_t, &slave_t::on_termination_timeout>(this);
 
     auto isolate = m_context.get<api::isolate_t>(
         m_profile.isolate.type,
@@ -251,6 +254,8 @@ void
 slave_t::shutdown() {
     BOOST_ASSERT(m_state == states::shutdown_by_slave);
 
+    m_idle_timer->stop();
+    m_heartbeat_timer->stop();
     m_termination_timer->start(m_profile.termination_timeout);
 }
 
@@ -325,6 +330,13 @@ slave_t::on_failure(const std::error_code& ec) {
     } break;
 
     case states::shutdown_by_slave: {
+        COCAINE_LOG_DEBUG(
+            m_log,
+            "slave %s has completed termination and shut itself down - [%d] %s",
+            m_id,
+            ec.value(),
+            ec.message()
+        );
         terminate(rpc::terminate::code::normal, "slave has completed termination and shut itself down");
     } break;
 
