@@ -160,6 +160,7 @@ slave_t::~slave_t() {
 
     m_heartbeat_timer->stop();
     m_idle_timer->stop();
+    m_termination_timer->stop();
 
     // Closes our end of the socket.
     m_channel.reset();
@@ -227,11 +228,30 @@ slave_t::assign(const std::shared_ptr<session_t>& session) {
 
 void
 slave_t::stop() {
-    BOOST_ASSERT(m_state == states::active);
+    BOOST_ASSERT(m_state == states::active
+                 || m_state == states::shutdown_by_slave);
 
-    m_state = states::inactive;
+    if(m_state == states::active) {
+        m_state = states::inactive;
 
-    m_channel->wr->write<rpc::terminate>(0UL, rpc::terminate::normal, "the engine is shutting down");
+        m_channel->wr->write<rpc::terminate>(0UL, rpc::terminate::normal, "the engine is shutting down");
+
+        m_heartbeat_timer->stop();
+        m_idle_timer->stop();
+        m_termination_timer->start(m_profile.termination_timeout);
+        
+    } else if(m_state == states::shutdown_by_slave) {
+
+        // slave is terminating by it's good will, no need to ask for it again
+        
+    }
+}
+
+void
+slave_t::shutdown() {
+    BOOST_ASSERT(m_state == states::shutdown_by_slave);
+
+    m_termination_timer->start(m_profile.termination_timeout);
 }
 
 void
@@ -254,7 +274,7 @@ slave_t::on_message(const message_t& message) {
         std::string reason;
 
         message.as<rpc::terminate>(code, reason);
-        on_death(code, reason);
+        on_terminate(code, reason);
     } break;
 
     case event_traits<rpc::chunk>::id: {
@@ -302,6 +322,10 @@ slave_t::on_failure(const std::error_code& ec) {
 
         dump();
         terminate(rpc::terminate::code::normal, "slave has unexpectedly disconnected");
+    } break;
+
+    case states::shutdown_by_slave: {
+        terminate(rpc::terminate::code::normal, "slave has completed termination and shut itself down");
     } break;
 
     case states::inactive: {
@@ -353,13 +377,37 @@ slave_t::on_ping() {
 }
 
 void
-slave_t::on_death(int code, const std::string& reason) {
+slave_t::on_terminate(int code, const std::string& reason) {
+
+    if(m_state == states::active && code == rpc::terminate::normal) {
+        COCAINE_LOG_DEBUG(
+            m_log,
+            "slave %s is requesting shutdown: %s",
+            m_id,
+            reason
+        );
+
+        m_state = states::shutdown_by_slave;
+
+        shutdown();
+        return;
+
+    }
+
     COCAINE_LOG_DEBUG(
         m_log,
         "slave %s is committing suicide: %s",
         m_id,
         reason
     );
+
+    // If the slave had accidentally sent a terminate message,
+    // requesting for "slow" termination, before it might have had a possibility to process
+    // our terminate message sent at some point earlier in stop(), it so happens here that we misinterpret this 
+    // slave's terminate message as a response to our abovementioned terminate request to slave,
+    // when in fact, slave had only requested that no sessions would be sent to it anymore.
+    // Instead, we assume that slave has just terminated ok, thus in this case the unfortunate slave
+    // is being killed before it had a chance to complete processing of it's pending sessions.
 
     // NOTE: This is the only case where code could be abnormal, triggering
     // the engine shutdown. Socket errors are not considered abnormal.
@@ -471,6 +519,10 @@ slave_t::on_timeout(ev::timer&, int) {
         COCAINE_LOG_ERROR(m_log, "slave %s has timed out", m_id);
         break;
 
+    case states::shutdown_by_slave:
+        COCAINE_LOG_ERROR(m_log, "slave %s has failed to terminate after it's own request", m_id);
+        break;
+
     case states::inactive:
         COCAINE_LOG_ERROR(m_log, "slave %s has failed to deactivate", m_id);
         break;
@@ -478,6 +530,16 @@ slave_t::on_timeout(ev::timer&, int) {
 
     dump();
     terminate(rpc::terminate::code::normal, "slave has timed out");
+}
+
+void
+slave_t::on_termination_timeout(ev::timer&, int) {
+    BOOST_ASSERT(m_state == states::shutdown_by_slave);
+
+    COCAINE_LOG_ERROR(m_log, "slave %s has failed to terminate in time after it's own request", m_id);
+
+    dump();
+    terminate(rpc::terminate::code::normal, "slave termination has timed out");
 }
 
 void

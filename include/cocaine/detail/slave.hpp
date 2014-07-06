@@ -46,6 +46,7 @@ class slave_t {
     enum class states {
         unknown,
         active,
+        shutdown_by_slave,
         inactive
     };
 
@@ -71,8 +72,13 @@ class slave_t {
 
         // Termination
 
+        // termination by engine
         void
         stop();
+
+        // termination by slave
+        void
+        shutdown();
 
     public:
         bool
@@ -98,7 +104,7 @@ class slave_t {
         on_ping();
 
         void
-        on_death(int code, const std::string& reason);
+        on_terminate(int code, const std::string& reason);
 
         void
         on_chunk(uint64_t session_id, const std::string& chunk);
@@ -113,6 +119,9 @@ class slave_t {
 
         void
         on_timeout(ev::timer&, int);
+
+        void
+        on_termination_timeout(ev::timer&, int);
 
         void
         on_idle(ev::timer&, int);
@@ -165,6 +174,7 @@ class slave_t {
 
         std::unique_ptr<ev::timer> m_heartbeat_timer;
         std::unique_ptr<ev::timer> m_idle_timer;
+        std::unique_ptr<ev::timer> m_termination_timer;
 
         // Native handle
 
